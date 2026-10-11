@@ -50,20 +50,64 @@ except ImportError:
 class AirCanvasStabilizer:
     """
     Stabilizer tailored for responsive Air Canvas drawing:
-      - Instant pen-up when leaving DRAW (to MOVE or NONE) or when hand is lost.
+      - Brief recoverable tracking loss tolerance (up to 2 frames) during active DRAW.
+      - Instant pen-up when intentionally leaving DRAW (to MOVE or NONE).
       - 2-frame responsive activation for entering DRAW.
       - Multi-frame hysteresis (4 frames) for destructive actions (UNDO, REDO, CLEAR).
     """
-    def __init__(self, required_consecutive: int = 4):
+    def __init__(self, required_consecutive: int = 4, tracking_loss_tolerance: int = 2):
         self.required_consecutive = required_consecutive
+        self.tracking_loss_tolerance = tracking_loss_tolerance
+        self.tracking_loss_count = 0
         self.current_candidate = "NONE"
         self.candidate_count = 0
         self.stable_gesture = "NONE"
         self.prev_stable_gesture = "NONE"
 
     def update(self, raw_gesture: str, has_hand: bool = True) -> Tuple[str, bool]:
-        if not has_hand or raw_gesture == "NONE":
-            # Hand is missing or gesture is NONE: immediate pen-up
+        if not has_hand:
+            # Temporary camera detection dropout (e.g. motion blur, brief occlusion)
+            if self.stable_gesture == "DRAW":
+                self.tracking_loss_count += 1
+                if self.tracking_loss_count <= self.tracking_loss_tolerance:
+                    # Tolerated brief loss: hold active DRAW state, no transition
+                    return "DRAW", False
+                # Prolonged tracking loss exceeding tolerance: cleanly transition to NONE
+                self.prev_stable_gesture = "DRAW"
+                self.stable_gesture = "NONE"
+                self.current_candidate = "NONE"
+                self.candidate_count = 0
+                self.tracking_loss_count = 0
+                return "NONE", True
+            else:
+                self.tracking_loss_count = 0
+                if self.stable_gesture != "NONE":
+                    self.prev_stable_gesture = self.stable_gesture
+                    self.stable_gesture = "NONE"
+                    self.current_candidate = "NONE"
+                    self.candidate_count = 0
+                    return "NONE", True
+                return "NONE", False
+
+        # has_hand is True: reset tracking loss count
+        self.tracking_loss_count = 0
+
+        # Intentional pen-up when leaving DRAW while hand is present
+        if self.stable_gesture == "DRAW" and raw_gesture != "DRAW":
+            if raw_gesture == "MOVE":
+                self.prev_stable_gesture = "DRAW"
+                self.stable_gesture = "MOVE"
+                self.current_candidate = "MOVE"
+                self.candidate_count = self.required_consecutive
+                return "MOVE", True
+            else:
+                self.prev_stable_gesture = "DRAW"
+                self.stable_gesture = "NONE"
+                self.current_candidate = raw_gesture
+                self.candidate_count = 1
+                return "NONE", True
+
+        if raw_gesture == "NONE":
             if self.stable_gesture != "NONE":
                 self.prev_stable_gesture = self.stable_gesture
                 self.stable_gesture = "NONE"
@@ -71,14 +115,6 @@ class AirCanvasStabilizer:
                 self.candidate_count = 0
                 return "NONE", True
             return "NONE", False
-
-        # Immediate pen-up when transitioning from DRAW to MOVE (no trailing strokes)
-        if self.stable_gesture == "DRAW" and raw_gesture == "MOVE":
-            self.prev_stable_gesture = "DRAW"
-            self.stable_gesture = "MOVE"
-            self.current_candidate = "MOVE"
-            self.candidate_count = self.required_consecutive
-            return "MOVE", True
 
         if raw_gesture == self.current_candidate:
             self.candidate_count += 1
@@ -103,8 +139,11 @@ class AirCanvasProtocolHandler:
     Manages client-side gesture state, coordinate normalization,
     and one-shot filtering before transmitting to TCP server.
     """
-    def __init__(self):
+    def __init__(self, max_reconnect_dist: float = 0.35):
         self.last_sent_gesture: Optional[str] = None
+        self.last_draw_coords: Optional[Tuple[float, float]] = None
+        self.in_tracking_loss: bool = False
+        self.max_reconnect_dist: float = max_reconnect_dist
         self.one_shot_fired = {
             "UNDO": False,
             "REDO": False,
@@ -125,6 +164,8 @@ class AirCanvasProtocolHandler:
 
         # One-shot trigger gestures (UNDO, REDO, CLEAR)
         if stable_gesture in ("UNDO", "REDO", "CLEAR"):
+            self.last_draw_coords = None
+            self.in_tracking_loss = False
             for g in self.one_shot_fired:
                 if g != stable_gesture:
                     self.one_shot_fired[g] = False
@@ -132,6 +173,8 @@ class AirCanvasProtocolHandler:
             if not self.one_shot_fired[stable_gesture]:
                 self.one_shot_fired[stable_gesture] = True
                 self.last_sent_gesture = stable_gesture
+                if has_hand and not (x_int == 0 and y_int == 0):
+                    return (stable_gesture, x_int, y_int)
                 return (stable_gesture, 0, 0)
             else:
                 return None
@@ -142,22 +185,49 @@ class AirCanvasProtocolHandler:
 
         # NONE state: notify server upon transition into NONE
         if stable_gesture == "NONE":
+            self.last_draw_coords = None
+            self.in_tracking_loss = False
             if self.last_sent_gesture != "NONE":
                 self.last_sent_gesture = "NONE"
                 return ("NONE", 0, 0)
             return None
 
         # Continuous tracking gestures (DRAW, MOVE) with valid coordinates
-        if stable_gesture in ("DRAW", "MOVE"):
+        if stable_gesture == "MOVE":
+            self.last_draw_coords = None
+            self.in_tracking_loss = False
             if not has_hand or (x_int == 0 and y_int == 0):
-                # Hand is missing or invalid coordinates. Cannot draw or move.
                 if self.last_sent_gesture in ("DRAW", "MOVE"):
                     self.last_sent_gesture = "NONE"
                     return ("NONE", 0, 0)
                 return None
 
-            self.last_sent_gesture = stable_gesture
-            return (stable_gesture, x_int, y_int)
+            self.last_sent_gesture = "MOVE"
+            return ("MOVE", x_int, y_int)
+
+        if stable_gesture == "DRAW":
+            if not has_hand or (x_int == 0 and y_int == 0):
+                # Temporary tracking loss during active DRAW grace period:
+                # Suppress dummy (0, 0) coordinates and keep stroke open
+                self.in_tracking_loss = True
+                return None
+
+            # Hand reacquired after tracking loss
+            if self.in_tracking_loss and self.last_draw_coords is not None:
+                prev_x, prev_y = self.last_draw_coords
+                jump_dist = math.hypot(raw_norm_x - prev_x, raw_norm_y - prev_y)
+                if jump_dist > self.max_reconnect_dist:
+                    # Reacquired too far away across canvas (> 35% screen distance):
+                    # Disconnect previous stroke cleanly to prevent cross-canvas diagonal lines
+                    self.last_sent_gesture = "NONE"
+                    self.in_tracking_loss = False
+                    self.last_draw_coords = (raw_norm_x, raw_norm_y)
+                    return ("NONE", 0, 0)
+
+            self.in_tracking_loss = False
+            self.last_draw_coords = (raw_norm_x, raw_norm_y)
+            self.last_sent_gesture = "DRAW"
+            return ("DRAW", x_int, y_int)
 
         return None
 

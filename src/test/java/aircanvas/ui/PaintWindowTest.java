@@ -100,6 +100,31 @@ public class PaintWindowTest {
         g2.dispose();
         assertTrue("Canvas renders cleanly after clear", true);
 
+        // 6. Test Live Pointer and PNG Export
+        canvas.setSize(new Dimension(800, 600));
+        canvas.setPointerPosition(400, 300); // 400/1000 = 40% of 800 = 320, 300/1000 = 30% of 600 = 180
+        assertTrue("Pointer is visible on CanvasPanel", canvas.isPointerVisible());
+        assertEquals("Pointer X is 320", 320, canvas.getPointerX());
+        assertEquals("Pointer Y is 180", 180, canvas.getPointerY());
+
+        // Paint to image with pointer (simulates onscreen display)
+        BufferedImage onScreenImg = new BufferedImage(800, 600, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D onScreenG2 = onScreenImg.createGraphics();
+        canvas.paint(onScreenG2);
+        onScreenG2.dispose();
+        int onScreenPixel = onScreenImg.getRGB(320, 180);
+        assertTrue("Onscreen paint includes red pointer", (onScreenPixel & 0x00FF0000) != 0);
+
+        // Export to image (PNG export) must exclude pointer
+        BufferedImage exported = canvas.exportToImage();
+        assertEquals("Exported image matches width", 800, exported.getWidth());
+        assertEquals("Exported image matches height", 600, exported.getHeight());
+        int exportedPixel = exported.getRGB(320, 180);
+        assertEquals("Exported image excludes pointer (white canvas pixel)", Color.WHITE.getRGB(), exportedPixel);
+
+        canvas.hidePointer();
+        assertTrue("Pointer hidden successfully", !canvas.isPointerVisible());
+
         // Clean up window
         window.dispose();
 

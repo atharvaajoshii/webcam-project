@@ -160,6 +160,47 @@ All data structures are located in `src/main/java/aircanvas/ds/` without JCF dep
     - Fix 2: Added coordinate guards in `AirCanvasProtocolHandler` suppressing `DRAW` when `has_hand=False` or `(x, y) == (0, 0)`.
     - Fix 3: In Java `GestureController.java`, added sentinel (0, 0) rejection, zero-sized canvas protection, and wired `CircularBuffer<Integer>` moving-average trajectory smoothing.
     - Validation: 379/379 Java assertions passing (all 9 suites), 30/30 Python tests passing (all suites).
-
-
+  - Completed Phase 8B Step 4B: Fast-Motion Tracking & Adaptive Smoothing:
+    - Root Cause Analysis:
+      - Primary cause of discontinuous strokes & gaps: Rapid hand motion causes camera motion blur, dropping MediaPipe hand detection for 1 frame (`has_hand=False`). Previously, `AirCanvasStabilizer` triggered immediate pen-up on frame 1 of dropped hand, emitting `NONE, 0, 0` and committing the stroke. Upon hand reacquisition 33ms later, the 2-frame stabilization requirement caused an additional delay, splitting a single rapid stroke into fragmented strokes with noticeable gaps.
+      - Primary cause of lag & angular/cut corners: Java `GestureController.java` used a fixed-window 4-point simple moving average (`CircularBuffer<Integer>(4)`). At fast speeds (50-120 px/frame), this fixed 4-frame window produced a ~2-frame (~66ms) group delay, lagging 50-100+ pixels behind the fingertip and severely cutting corners/flattening curves into angular polygons.
+      - Stationary landmark jitter: Natural camera sensor and landmark predictor noise causes 2-5 pixel jitter when hand is still, which requires strong smoothing when stationary but zero smoothing when moving quickly.
+    - Implementation Details:
+      - Java Adaptive Smoothing (`GestureController.java`): Calculates displacement $\Delta d = \sqrt{\Delta x^2 + \Delta y^2}$ between successive points.
+        - High-speed motion ($\Delta d \ge 28$ px): Clears stale pre-motion history from `CircularBuffer` and uses instantaneous raw coordinate ($k = 1$). Zero lag, sharp corners preserved with 100% fidelity.
+        - Moderate motion ($10 \le \Delta d < 28$ px): Averages the newest 2 points ($k = 2$) for responsive line smoothing.
+        - Low-speed / stationary ($\Delta d < 10$ px): Uses the full 4-sample `CircularBuffer` window ($k = 4$) to suppress webcam tremor and sensor jitter.
+      - Python Tracking Dropout Tolerance (`AirCanvasStabilizer` in `air_canvas_client.py`):
+        - Tolerates brief camera detection loss (`has_hand=False`) up to 2 consecutive frames (~60ms) during active `DRAW`.
+        - `AirCanvasProtocolHandler` suppresses output during grace period: no dummy `(0, 0)` is sent, and Java stroke remains open.
+        - When hand reacquires within tolerance and within 35% normalized screen distance, drawing resumes seamlessly in the same stroke.
+        - If hand reacquires across the screen (> 35% distance jump), prior stroke is cleanly disconnected with `NONE` first to prevent cross-canvas diagonal lines.
+        - Prolonged tracking loss ($\ge 3$ frames) cleanly transitions to `NONE` and finishes the stroke.
+      - Instant Pen-Up Preserved:
+        - When hand is present (`has_hand=True`), intentional transitions from `DRAW` to `MOVE` or `NONE` trigger immediate pen-up on frame 1 (0-frame delay), ensuring consecutive strokes are never joined and no trailing tails occur.
+      - One-Shot Actions Preserved:
+        - `UNDO`, `REDO`, and `CLEAR` maintain 4-frame hysteresis and single-trigger firing.
+    - Test Results:
+      - Java Tests: 389/389 passing assertions across 9 test suites (+10 new assertions in `GestureControllerTest.java` verifying jitter suppression, high-speed tracking, corner preservation, and stroke isolation).
+      - Python Tests: 34/34 passing tests across 4 test suites (+4 new tests in `test_air_canvas_client.py` verifying brief tracking loss tolerance, cross-canvas disconnect, prolonged loss termination, and intentional pen-up).
+    - Status:
+      - Part A: Checkpoint `135fbce` pushed to `origin/dev`.
+      - Part B: Adaptive smoothing and fast-motion tracking changes implemented and fully verified locally. Not committed or pushed per instructions.
+  - Completed Live Fingertip Pointer Implementation:
+    - Live Pointer Behavior:
+      - Added real-time circular pointer overlay in `CanvasPanel.java` with vibrant red core (`rgb(230, 30, 30)`), white inner ring, and dark outline (radius 7px) for high contrast on white canvas and across all stroke colors.
+      - Decoupled pointer state (`pointerVisible`, `pointerNormX`, `pointerNormY`) from `DrawingEngine`, stroke list, and undo/redo history.
+      - During `MOVE`: updates pointer position continuously without appending any stroke points or modifying undo/redo stacks.
+      - During `DRAW`: keeps pointer visible at current index fingertip position while streaming smoothed stroke points.
+      - During `UNDO` / `REDO` / `CLEAR`: preserves existing one-shot functionality and displays pointer at fingertip when hand coordinates are available.
+      - Upon `NONE`, tracking loss, or dummy sentinel `(0, 0)` coordinates: hides pointer immediately; never renders pointer at `(0, 0)` or leaves stale pointer artifacts.
+    - Clean PNG Export:
+      - Implemented `exportToImage()` and `exportToPNG(File)` on `CanvasPanel.java` rendering background and visible strokes directly without the transient pointer overlay. Verified in automated tests.
+    - Responsive Coordinate Alignment & Resizing:
+      - Pointer uses identical normalized mapping `[0, 1000]` mapped to dynamic panel dimensions `(getWidth(), getHeight())`. Resizing window keeps pointer and drawing strokes aligned.
+    - Test Results:
+      - Java Tests: 419/419 assertions passing across 9 test suites (+30 new assertions in `GestureControllerTest.java` and `PaintWindowTest.java` verifying MOVE pointer, DRAW pointer, NONE hide, tracking loss hide, resize alignment, and PNG export exclusion).
+      - Python Tests: 34/34 passing tests across 4 test suites (100% pass rate).
+    - Status:
+      - All changes verified locally. Documentation added (README.md). Ready for final push.
 

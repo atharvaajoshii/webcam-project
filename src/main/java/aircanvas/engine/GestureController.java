@@ -2,6 +2,7 @@ package aircanvas.engine;
 
 import aircanvas.ds.CircularBuffer;
 import aircanvas.network.GestureServer;
+import aircanvas.ui.CanvasPanel;
 
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
@@ -11,6 +12,9 @@ import javax.swing.SwingUtilities;
  *
  * Implements one-shot trigger behavior for discrete actions (UNDO, REDO, CLEAR)
  * and streams continuous smoothed trajectory coordinates during DRAW.
+ *
+ * Coordinates live fingertip pointer overlay updates on CanvasPanel for MOVE and DRAW,
+ * hiding the pointer when tracking is lost or inactive.
  *
  * Ensures all Swing and DrawingEngine state updates execute safely on the
  * Event Dispatch Thread (EDT).
@@ -27,6 +31,9 @@ public class GestureController implements GestureServer.GestureEventListener {
     private final CircularBuffer<Integer> yBuffer;
 
     private String previousGesture;
+    private int lastSmoothX;
+    private int lastSmoothY;
+    private boolean hasLastSmoothPoint;
 
     public GestureController(DrawingEngine engine, JPanel canvasPanel, Runnable onStateChanged) {
         if (engine == null) {
@@ -38,6 +45,9 @@ public class GestureController implements GestureServer.GestureEventListener {
         this.xBuffer = new CircularBuffer<>(4);
         this.yBuffer = new CircularBuffer<>(4);
         this.previousGesture = GestureServer.GESTURE_NONE;
+        this.lastSmoothX = 0;
+        this.lastSmoothY = 0;
+        this.hasLastSmoothPoint = false;
     }
 
     /**
@@ -92,36 +102,74 @@ public class GestureController implements GestureServer.GestureEventListener {
         pixelY = Math.max(0, Math.min(canvasHeight, pixelY));
 
         boolean gestureChanged = !gesture.equals(previousGesture);
+        boolean hasValidCoords = (normX > 0 || normY > 0);
 
         switch (gesture) {
             case GestureServer.GESTURE_DRAW:
                 // Guard: Ignore dummy sentinel coordinates (0, 0)
                 if (normX == 0 && normY == 0) {
+                    hidePointer();
                     return;
                 }
+
+                // Keep pointer visible at current fingertip position during DRAW
+                updatePointerPosition(normX, normY);
 
                 if (gestureChanged || !engine.hasActiveStroke()) {
                     // Transition into DRAW -> begin a new stroke independently
                     engine.beginStroke();
                     xBuffer.clear();
                     yBuffer.clear();
+                    hasLastSmoothPoint = false;
+                }
+
+                // Compute displacement from previous smoothed point to adapt smoothing
+                double distance = 0.0;
+                if (hasLastSmoothPoint) {
+                    double dx = pixelX - lastSmoothX;
+                    double dy = pixelY - lastSmoothY;
+                    distance = Math.hypot(dx, dy);
+                }
+
+                // Adaptive smoothing:
+                // High speed (distance >= 28 px): reset stale history, use current coordinate (0 lag, sharp corners)
+                // Moderate speed (10 <= distance < 28 px): average newest 2 points (light smoothing)
+                // Low speed / stationary (distance < 10 px): average full buffer (suppresses webcam jitter)
+                if (distance >= 28.0) {
+                    xBuffer.clear();
+                    yBuffer.clear();
                 }
 
                 xBuffer.add(pixelX);
                 yBuffer.add(pixelY);
-                int smoothX = calculateAverage(xBuffer);
-                int smoothY = calculateAverage(yBuffer);
+
+                int smoothX = calculateAdaptiveAverage(xBuffer, distance);
+                int smoothY = calculateAdaptiveAverage(yBuffer, distance);
+
+                lastSmoothX = smoothX;
+                lastSmoothY = smoothY;
+                hasLastSmoothPoint = true;
 
                 engine.addPoint(smoothX, smoothY);
                 break;
 
             case GestureServer.GESTURE_MOVE:
                 terminateActiveStroke();
-                // Cursor movement without drawing points
+                // Move pointer without drawing points
+                if (hasValidCoords) {
+                    updatePointerPosition(normX, normY);
+                } else {
+                    hidePointer();
+                }
                 break;
 
             case GestureServer.GESTURE_UNDO:
                 terminateActiveStroke();
+                if (hasValidCoords) {
+                    updatePointerPosition(normX, normY);
+                } else {
+                    hidePointer();
+                }
                 if (gestureChanged) {
                     // One-shot: trigger exactly once per gesture activation
                     engine.undo();
@@ -130,6 +178,11 @@ public class GestureController implements GestureServer.GestureEventListener {
 
             case GestureServer.GESTURE_REDO:
                 terminateActiveStroke();
+                if (hasValidCoords) {
+                    updatePointerPosition(normX, normY);
+                } else {
+                    hidePointer();
+                }
                 if (gestureChanged) {
                     // One-shot: trigger exactly once per gesture activation
                     engine.redo();
@@ -138,6 +191,11 @@ public class GestureController implements GestureServer.GestureEventListener {
 
             case GestureServer.GESTURE_CLEAR:
                 terminateActiveStroke();
+                if (hasValidCoords) {
+                    updatePointerPosition(normX, normY);
+                } else {
+                    hidePointer();
+                }
                 if (gestureChanged) {
                     // One-shot: trigger exactly once per gesture activation
                     engine.clear();
@@ -147,11 +205,24 @@ public class GestureController implements GestureServer.GestureEventListener {
             case GestureServer.GESTURE_NONE:
             default:
                 terminateActiveStroke();
+                hidePointer();
                 // Re-arms all one-shot gestures by transitioning state away
                 break;
         }
 
         this.previousGesture = gesture;
+    }
+
+    private void updatePointerPosition(int normX, int normY) {
+        if (canvasPanel instanceof CanvasPanel cp) {
+            cp.setPointerPosition(normX, normY);
+        }
+    }
+
+    private void hidePointer() {
+        if (canvasPanel instanceof CanvasPanel cp) {
+            cp.hidePointer();
+        }
     }
 
     private void terminateActiveStroke() {
@@ -160,17 +231,49 @@ public class GestureController implements GestureServer.GestureEventListener {
         }
         xBuffer.clear();
         yBuffer.clear();
+        hasLastSmoothPoint = false;
     }
 
-    private int calculateAverage(CircularBuffer<Integer> buffer) {
+    private int calculateAdaptiveAverage(CircularBuffer<Integer> buffer, double distance) {
         if (buffer.isEmpty()) {
             return 0;
         }
+        int k;
+        if (distance >= 28.0) {
+            k = 1;
+        } else if (distance >= 10.0) {
+            k = Math.min(2, buffer.size());
+        } else {
+            k = buffer.size();
+        }
+
         int sum = 0;
-        for (int i = 0; i < buffer.size(); i++) {
+        int startIndex = buffer.size() - k;
+        for (int i = startIndex; i < buffer.size(); i++) {
             sum += buffer.get(i);
         }
-        return Math.round((float) sum / buffer.size());
+        return Math.round((float) sum / k);
+    }
+
+    public boolean isPointerVisible() {
+        if (canvasPanel instanceof CanvasPanel cp) {
+            return cp.isPointerVisible();
+        }
+        return false;
+    }
+
+    public int getPointerX() {
+        if (canvasPanel instanceof CanvasPanel cp) {
+            return cp.getPointerX();
+        }
+        return 0;
+    }
+
+    public int getPointerY() {
+        if (canvasPanel instanceof CanvasPanel cp) {
+            return cp.getPointerY();
+        }
+        return 0;
     }
 
     public String getPreviousGesture() {
@@ -179,6 +282,7 @@ public class GestureController implements GestureServer.GestureEventListener {
 
     public void reset() {
         terminateActiveStroke();
+        hidePointer();
         this.previousGesture = GestureServer.GESTURE_NONE;
     }
 }

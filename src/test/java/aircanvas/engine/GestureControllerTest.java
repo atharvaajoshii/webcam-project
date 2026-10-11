@@ -154,8 +154,95 @@ public class GestureControllerTest {
         assertEquals("Stroke 2 first point X is 700", 700, s2.getHead().x);
         assertEquals("Stroke 2 first point Y is 700", 700, s2.getHead().y);
 
+        // 11. Adaptive Smoothing: Low-speed jitter suppression vs. High-speed zero-lag tracking
+        engine.clear();
+        controller.processGesture("NONE", 0, 0, 1000, 1000);
+        // A. Start slow stroke with slight sensor jitter (all displacements < 10 px)
+        controller.processGesture("DRAW", 100, 100, 1000, 1000); // Point 1: (100, 100)
+        controller.processGesture("DRAW", 102, 100, 1000, 1000); // Point 2: smoothed with Point 1
+        controller.processGesture("DRAW", 98, 100, 1000, 1000);  // Point 3: smoothed with Points 1 & 2
+        controller.processGesture("DRAW", 100, 100, 1000, 1000); // Point 4: smoothed over 4-point buffer
+        aircanvas.ds.Stroke jitterStroke = engine.getActiveStroke();
+        assertEquals("Active stroke has 4 jitter points", 4, jitterStroke.getPointCount());
+        // Trailing point should average out 100, 102, 98, 100 -> exactly 100
+        aircanvas.ds.PointNode lastJitterPt = jitterStroke.getTail();
+        assertEquals("Jitter point X smoothed to average 100", 100, lastJitterPt.x);
+        assertEquals("Jitter point Y smoothed to average 100", 100, lastJitterPt.y);
 
-        // 8. End-to-end TCP Socket + GestureServer + GestureController Integration
+        // B. High-speed rapid motion (displacement 80 px >= 28 px)
+        // Must clear stale slow history and track raw coordinate with zero lag
+        controller.processGesture("DRAW", 180, 100, 1000, 1000); // Fast move to 180
+        aircanvas.ds.PointNode fastPt1 = jitterStroke.getTail();
+        assertEquals("Fast motion point X tracks raw position at 180 (zero lag)", 180, fastPt1.x);
+        assertEquals("Fast motion point Y tracks raw position at 100", 100, fastPt1.y);
+
+        // C. High-speed sharp corner preservation (displacement 80 px downwards)
+        controller.processGesture("DRAW", 180, 180, 1000, 1000); // Fast 90-degree turn
+        aircanvas.ds.PointNode cornerPt = jitterStroke.getTail();
+        assertEquals("Sharp corner X preserved at 180 without corner clipping", 180, cornerPt.x);
+        assertEquals("Sharp corner Y preserved at 180 without lag", 180, cornerPt.y);
+
+        // D. Immediate pen-up upon intentional transition to MOVE
+        controller.processGesture("MOVE", 250, 250, 1000, 1000);
+        assertTrue("Active stroke immediately finished on MOVE", !engine.hasActiveStroke());
+        assertEquals("Stroke committed to canvas (count: 1)", 1, engine.getVisibleStrokeCount());
+        assertEquals("Total points in committed stroke is 6", 6, engine.getVisibleStrokesHead().getStroke().getPointCount());
+
+        // 12. Live Fingertip Pointer Behavior
+        DrawingEngine pointerEngine = new DrawingEngine();
+        aircanvas.ui.CanvasPanel pointerCanvas = new aircanvas.ui.CanvasPanel(pointerEngine, null);
+        pointerCanvas.setSize(1000, 1000);
+        GestureController pointerController = new GestureController(pointerEngine, pointerCanvas, null);
+
+        // A. Initially pointer is not visible
+        assertTrue("Pointer hidden initially", !pointerCanvas.isPointerVisible());
+
+        // B. MOVE updates pointer position without adding stroke or altering undo/redo history
+        pointerController.processGesture("MOVE", 350, 450, 1000, 1000);
+        assertTrue("MOVE makes pointer visible", pointerCanvas.isPointerVisible());
+        assertEquals("Pointer X is 350 on MOVE", 350, pointerCanvas.getPointerX());
+        assertEquals("Pointer Y is 450 on MOVE", 450, pointerCanvas.getPointerY());
+        assertEquals("No strokes added on MOVE", 0, pointerEngine.getVisibleStrokeCount());
+        assertEquals("Undo history unchanged on MOVE", 0, pointerEngine.getUndoCount());
+        assertEquals("Redo history unchanged on MOVE", 0, pointerEngine.getRedoCount());
+
+        // C. DRAW updates pointer and draws normally
+        pointerController.processGesture("DRAW", 500, 600, 1000, 1000);
+        assertTrue("DRAW keeps pointer visible", pointerCanvas.isPointerVisible());
+        assertEquals("Pointer X is 500 on DRAW", 500, pointerCanvas.getPointerX());
+        assertEquals("Pointer Y is 600 on DRAW", 600, pointerCanvas.getPointerY());
+        assertTrue("DRAW has active stroke", pointerEngine.hasActiveStroke());
+
+        // D. NONE hides the pointer
+        pointerController.processGesture("NONE", 0, 0, 1000, 1000);
+        assertTrue("NONE hides pointer", !pointerCanvas.isPointerVisible());
+        assertEquals("Stroke committed after NONE", 1, pointerEngine.getVisibleStrokeCount());
+
+        // E. Tracking loss (0, 0) hides pointer and never moves to (0, 0)
+        pointerController.processGesture("MOVE", 200, 200, 1000, 1000);
+        assertTrue("Pointer visible before tracking loss", pointerCanvas.isPointerVisible());
+        pointerController.processGesture("MOVE", 0, 0, 1000, 1000);
+        assertTrue("Tracking loss (0,0) in MOVE hides pointer", !pointerCanvas.isPointerVisible());
+
+        pointerController.processGesture("DRAW", 0, 0, 1000, 1000);
+        assertTrue("Sentinel (0,0) in DRAW keeps pointer hidden", !pointerCanvas.isPointerVisible());
+
+        // F. Coordinate alignment after resizing
+        // Canvas resized from 1000x1000 to 500x500
+        pointerCanvas.setSize(500, 500);
+        pointerController.processGesture("MOVE", 400, 600, 500, 500); // 40% of 500 = 200, 60% of 500 = 300
+        assertTrue("Pointer visible after resize", pointerCanvas.isPointerVisible());
+        assertEquals("Pointer X scaled to 200 on 500px width", 200, pointerCanvas.getPointerX());
+        assertEquals("Pointer Y scaled to 300 on 500px height", 300, pointerCanvas.getPointerY());
+
+        // G. PNG export excludes the live pointer overlay
+        java.awt.image.BufferedImage exportedImg = pointerCanvas.exportToImage();
+        assertEquals("Exported image width matches canvas", 500, exportedImg.getWidth());
+        assertEquals("Exported image height matches canvas", 500, exportedImg.getHeight());
+        int exportedPixel = exportedImg.getRGB(200, 300);
+        assertEquals("Exported image at pointer coord is white (no pointer rendered)", java.awt.Color.WHITE.getRGB(), exportedPixel);
+
+        // 13. End-to-end TCP Socket + GestureServer + GestureController Integration
         int testPort;
         try (ServerSocket tempSocket = new ServerSocket(0)) {
             testPort = tempSocket.getLocalPort();
