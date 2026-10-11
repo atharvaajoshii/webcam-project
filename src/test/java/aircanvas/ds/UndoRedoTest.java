@@ -35,7 +35,7 @@ public class UndoRedoTest {
         assertTrue("UndoStack empty initially", undo.isEmpty());
         assertTrue("UndoStack not full initially", !undo.isFull());
         assertEquals("UndoStack size 0 initially", 0, undo.size());
-        assertEquals("UndoStack capacity is 3", 3, undo.capacity());
+        assertEquals("UndoStack capacity is 5", 5, undo.capacity());
 
         boolean caughtEmptyUndoPop = false;
         try {
@@ -96,29 +96,39 @@ public class UndoRedoTest {
         assertTrue("Second pop is n1", undo.pop() == n1);
         assertTrue("Undo empty after popping all", undo.isEmpty());
 
-        // 4. UndoStack 3-stroke capacity limit & overflow eviction
+        // 4. UndoStack 5-stroke capacity limit & overflow eviction on 6th push
         Stroke s3 = new Stroke();
         StrokeList.StrokeNode n3 = new StrokeList.StrokeNode(s3);
 
         Stroke s4 = new Stroke();
         StrokeList.StrokeNode n4 = new StrokeList.StrokeNode(s4);
 
+        Stroke s5 = new Stroke();
+        StrokeList.StrokeNode n5 = new StrokeList.StrokeNode(s5);
+
+        Stroke s6 = new Stroke();
+        StrokeList.StrokeNode n6 = new StrokeList.StrokeNode(s6);
+
         undo.push(n1);
         undo.push(n2);
         undo.push(n3);
-        assertTrue("UndoStack is full at 3 elements", undo.isFull());
-        assertEquals("Undo size is 3", 3, undo.size());
+        undo.push(n4);
+        undo.push(n5);
+        assertTrue("UndoStack is full at 5 elements", undo.isFull());
+        assertEquals("Undo size is 5", 5, undo.size());
 
-        // Push 4th stroke -> oldest (n1) must be evicted!
-        StrokeList.StrokeNode evicted = undo.push(n4);
+        // Push 6th stroke -> oldest (n1) must be evicted!
+        StrokeList.StrokeNode evicted = undo.push(n6);
         assertTrue("Evicted element is oldest stroke n1", evicted == n1);
-        assertTrue("UndoStack remains full at 3 elements", undo.isFull());
-        assertEquals("Undo size remains 3", 3, undo.size());
+        assertTrue("UndoStack remains full at 5 elements", undo.isFull());
+        assertEquals("Undo size remains 5", 5, undo.size());
 
-        // Popping the 3 elements must return n4, n3, n2 (n1 is no longer in undo history)
-        assertTrue("Pop 1 is newest n4", undo.pop() == n4);
-        assertTrue("Pop 2 is n3", undo.pop() == n3);
-        assertTrue("Pop 3 is n2", undo.pop() == n2);
+        // Popping the 5 elements must return n6, n5, n4, n3, n2 (n1 is no longer in undo history)
+        assertTrue("Pop 1 is newest n6", undo.pop() == n6);
+        assertTrue("Pop 2 is n5", undo.pop() == n5);
+        assertTrue("Pop 3 is n4", undo.pop() == n4);
+        assertTrue("Pop 4 is n3", undo.pop() == n3);
+        assertTrue("Pop 5 is n2", undo.pop() == n2);
         assertTrue("UndoStack empty; n1 was discarded", undo.isEmpty());
 
         // 5. Invariant: Discarded undo history remains visible in StrokeList
@@ -129,6 +139,8 @@ public class UndoRedoTest {
         Stroke st2 = new Stroke();
         Stroke st3 = new Stroke();
         Stroke st4 = new Stroke();
+        Stroke st5 = new Stroke();
+        Stroke st6 = new Stroke();
 
         StrokeList.StrokeNode vn1 = visibleCanvas.append(st1);
         undoHistory.push(vn1);
@@ -140,11 +152,23 @@ public class UndoRedoTest {
         undoHistory.push(vn3);
 
         StrokeList.StrokeNode vn4 = visibleCanvas.append(st4);
-        undoHistory.push(vn4); // evicts vn1 from undo stack
+        undoHistory.push(vn4);
 
-        assertEquals("All 4 strokes remain visible on canvas", 4, visibleCanvas.size());
+        StrokeList.StrokeNode vn5 = visibleCanvas.append(st5);
+        undoHistory.push(vn5);
 
-        // Perform 3 undos (all available in undo history)
+        StrokeList.StrokeNode vn6 = visibleCanvas.append(st6);
+        undoHistory.push(vn6); // evicts vn1 from undo stack
+
+        assertEquals("All 6 strokes remain visible on canvas", 6, visibleCanvas.size());
+
+        // Perform 5 undos (all available in undo history)
+        StrokeList.StrokeNode undone6 = undoHistory.pop();
+        visibleCanvas.remove(undone6);
+
+        StrokeList.StrokeNode undone5 = undoHistory.pop();
+        visibleCanvas.remove(undone5);
+
         StrokeList.StrokeNode undone4 = undoHistory.pop();
         visibleCanvas.remove(undone4);
 
@@ -163,16 +187,18 @@ public class UndoRedoTest {
         redoHistory.push(undone2);
         redoHistory.push(undone3);
         redoHistory.push(undone4);
+        redoHistory.push(undone5);
+        redoHistory.push(undone6);
 
-        assertEquals("Redo size is 3", 3, redoHistory.size());
-        assertTrue("Redo peek is most recently undone (undone4)", redoHistory.peek() == undone4);
+        assertEquals("Redo size is 5", 5, redoHistory.size());
+        assertTrue("Redo peek is most recently undone (undone6)", redoHistory.peek() == undone6);
 
-        // Redo 1 stroke -> restores undone4
-        StrokeList.StrokeNode redone4 = redoHistory.pop();
-        assertTrue("Redone node is undone4", redone4 == undone4);
-        visibleCanvas.restore(redone4);
+        // Redo 1 stroke -> restores undone6
+        StrokeList.StrokeNode redone6 = redoHistory.pop();
+        assertTrue("Redone node is undone6", redone6 == undone6);
+        visibleCanvas.restore(redone6);
         assertEquals("Canvas size increased to 2 after redo", 2, visibleCanvas.size());
-        assertTrue("Canvas tail is now restored st4", visibleCanvas.getTail().getStroke() == st4);
+        assertTrue("Canvas tail is now restored st6", visibleCanvas.getTail().getStroke() == st6);
 
         // 7. New stroke invalidates redo history
         Stroke stNew = new Stroke();

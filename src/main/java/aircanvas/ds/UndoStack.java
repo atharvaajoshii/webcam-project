@@ -4,7 +4,7 @@ package aircanvas.ds;
  * Custom Bounded Circular-Array Stack for Undo History.
  *
  * Stores references to StrokeList.StrokeNode up to a strict capacity limit
- * (default 3 undoable strokes).
+ * (default 5 undoable strokes).
  *
  * Behavior on Overflow:
  * When a stroke is pushed while full, the OLDEST history entry is evicted
@@ -23,7 +23,7 @@ package aircanvas.ds;
  *  - clear():    O(capacity)
  */
 public class UndoStack {
-    public static final int DEFAULT_CAPACITY = 3;
+    public static final int DEFAULT_CAPACITY = 5;
 
     private final StrokeList.StrokeNode[] data;
     private final int capacity;
