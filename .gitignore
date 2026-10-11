@@ -1,0 +1,15 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Build and compilation outputs
+out/
+bin/
+target/
+*.class
+
+# OS artifacts
+Thumbs.db
+Desktop.ini
+.DS_Store
