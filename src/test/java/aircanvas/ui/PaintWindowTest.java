@@ -38,7 +38,7 @@ public class PaintWindowTest {
         System.out.println("=== Testing PaintWindow and CanvasPanel ===");
 
         DrawingEngine engine = new DrawingEngine();
-        PaintWindow window = new PaintWindow(engine);
+        PaintWindow window = new PaintWindow(engine, false);
 
         // 1. Window properties
         assertEquals("Title is 'Air Canvas'", "Air Canvas", window.getTitle());

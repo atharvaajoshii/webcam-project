@@ -9,7 +9,15 @@ bin/
 target/
 *.class
 
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+
+# Model files (auto-downloaded on first run)
+*.task
+
 # OS artifacts
 Thumbs.db
 Desktop.ini
 .DS_Store
+

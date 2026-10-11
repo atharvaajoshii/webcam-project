@@ -1,6 +1,8 @@
 package aircanvas.ui;
 
 import aircanvas.engine.DrawingEngine;
+import aircanvas.engine.GestureController;
+import aircanvas.network.GestureServer;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -16,6 +18,9 @@ import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
+import java.io.IOException;
 
 /**
  * Authoritative Air Canvas Paint Window.
@@ -23,20 +28,28 @@ import java.awt.Font;
  * Provides a Swing GUI containing the interactive CanvasPanel,
  * controls for Undo/Redo/Clear, color palette buttons, thickness slider,
  * and a status bar indicating canvas state.
+ *
+ * Hosts a background GestureServer listening for incoming TCP gestures.
  */
 public class PaintWindow extends JFrame {
 
     private final DrawingEngine engine;
     private final CanvasPanel canvasPanel;
+    private final GestureServer server;
+    private final GestureController gestureController;
 
     private final JLabel statusLabel;
     private String colorName = "Black";
 
     public PaintWindow() {
-        this(new DrawingEngine());
+        this(new DrawingEngine(), true);
     }
 
     public PaintWindow(DrawingEngine engine) {
+        this(engine, true);
+    }
+
+    public PaintWindow(DrawingEngine engine, boolean startServerImmediately) {
         super("Air Canvas");
         this.engine = engine;
 
@@ -60,9 +73,44 @@ public class PaintWindow extends JFrame {
         add(canvasPanel, BorderLayout.CENTER);
         add(createStatusBar(), BorderLayout.SOUTH);
 
+        // Integration with GestureServer and GestureController
+        this.gestureController = new GestureController(engine, canvasPanel, this::updateStatusBar);
+        this.server = new GestureServer();
+        this.server.setEventListener(gestureController);
+
+        // Clean port release when window closes
+        addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                stopServer();
+            }
+        });
+
+        if (startServerImmediately) {
+            startServer();
+        }
+
         updateStatusBar();
         pack();
         setLocationRelativeTo(null);
+    }
+
+    public void startServer() {
+        if (!server.isRunning()) {
+            try {
+                server.start();
+                System.out.println("[Air Canvas] GestureServer listening on 127.0.0.1:" + server.getPort());
+            } catch (IOException e) {
+                System.err.println("[Air Canvas] Failed to start GestureServer on port " + server.getPort() + ": " + e.getMessage());
+            }
+        }
+    }
+
+    public void stopServer() {
+        if (server != null && server.isRunning()) {
+            server.stop();
+            System.out.println("[Air Canvas] GestureServer stopped and port released.");
+        }
     }
 
     private JPanel createToolbar() {
@@ -172,6 +220,14 @@ public class PaintWindow extends JFrame {
 
     public CanvasPanel getCanvasPanel() {
         return canvasPanel;
+    }
+
+    public GestureServer getServer() {
+        return server;
+    }
+
+    public GestureController getGestureController() {
+        return gestureController;
     }
 
     public static void main(String[] args) {
